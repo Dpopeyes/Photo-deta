@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // IndexedDB Configuration
     const DB_NAME = 'PhotoGalleryDB';
-    const DB_VERSION = 1;
+    const DB_VERSION = 2; // Increment version to force schema update if needed (though we use same store)
     const STORE_NAME = 'images';
 
     let db;
@@ -52,6 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let promiseChain = Promise.resolve();
 
         files.forEach(file => {
+            // Relaxed check
             if (file.type && !file.type.startsWith('image/')) return;
 
             promiseChain = promiseChain.then(() => {
@@ -74,17 +75,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function saveImageToDB(file) {
         return new Promise((resolve, reject) => {
-            // Validate file size
             if (file.size === 0) {
-                console.warn("File size is 0, skipping:", file.name);
-                resolve(); // Skip empty files
+                resolve();
                 return;
             }
 
+            // Use FileReader to read as Base64 Data URL
+            // This is the most compatible way to display images
             const reader = new FileReader();
 
             reader.onload = (e) => {
-                const arrayBuffer = e.target.result;
+                const base64Data = e.target.result;
+
                 const transaction = db.transaction([STORE_NAME], "readwrite");
                 const objectStore = transaction.objectStore(STORE_NAME);
 
@@ -92,26 +94,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 const date = new Date(timestamp);
                 const dateKey = date.toISOString().split('T')[0];
 
-                // Better MIME type detection
+                // Guess type from Base64 header if file.type is missing
                 let fileType = file.type;
-                if (!fileType || fileType === '') {
-                    const ext = file.name.split('.').pop().toLowerCase();
-                    if (ext === 'png') fileType = 'image/png';
-                    else if (ext === 'webp') fileType = 'image/webp';
-                    else if (ext === 'heic') fileType = 'image/heic';
-                    else if (ext === 'heif') fileType = 'image/heif';
-                    else fileType = 'image/jpeg';
+                if (!fileType) {
+                    const match = base64Data.match(/^data:(image\/[a-z]+);base64,/);
+                    if (match) {
+                        fileType = match[1];
+                    } else {
+                        fileType = 'image/jpeg'; // Default
+                    }
                 }
-
-                // Create a new Blob from the ArrayBuffer to ensure we have the actual data
-                const blob = new Blob([arrayBuffer], { type: fileType });
 
                 const imageData = {
                     name: file.name || `photo_${timestamp}.${fileType.split('/')[1] || 'jpg'}`,
                     type: fileType,
                     timestamp: timestamp,
                     dateKey: dateKey,
-                    blob: blob
+                    base64: base64Data // Store Base64 string instead of Blob
                 };
 
                 const request = objectStore.add(imageData);
@@ -120,13 +119,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 request.onerror = (event) => reject(event.target.error);
             };
 
-            reader.onerror = (e) => {
-                console.error("FileReader error:", e);
-                reject(e);
-            };
+            reader.onerror = (e) => reject(e);
 
-            // Read the file content to ensure we capture the data
-            reader.readAsArrayBuffer(file);
+            reader.readAsDataURL(file);
         });
     }
 
@@ -196,10 +191,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 photoItem.className = 'photo-item';
 
                 const img = document.createElement('img');
-                img.src = URL.createObjectURL(data.blob);
+                // Use Base64 string directly
+                img.src = data.base64;
                 img.alt = data.name;
                 img.loading = 'lazy';
                 img.onload = () => img.classList.add('loaded');
+                img.onerror = () => {
+                    // Fallback for broken images
+                    img.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjY2IiBzdHJva2Utd2lkdGg9IjIiPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8+PGxpbmUgeDE9IjEyIiB5MT0iOCIgeDI9IjEyIiB5Mj0iMTIiLz48bGluZSB4MT0iMTIiIHkxPSIxNiIgeDI9IjEyLjAxIiB5Mj0iMTYiLz48L3N2Zz4=';
+                    img.style.padding = '20px';
+                };
 
                 photoItem.onclick = () => viewImage(data);
 
@@ -252,21 +253,45 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Helper to convert Base64 back to Blob for sharing/saving
+    function base64ToBlob(base64) {
+        try {
+            const arr = base64.split(',');
+            const mime = arr[0].match(/:(.*?);/)[1];
+            const bstr = atob(arr[1]);
+            let n = bstr.length;
+            const u8arr = new Uint8Array(n);
+            while (n--) {
+                u8arr[n] = bstr.charCodeAt(n);
+            }
+            return new Blob([u8arr], { type: mime });
+        } catch (e) {
+            console.error("Blob conversion failed", e);
+            return null;
+        }
+    }
+
     async function shareGroup(dateKey) {
         const images = imageGroups[dateKey];
         if (!images || images.length === 0) return;
 
         try {
-            const files = images.map(data => data.blob);
+            // Convert all base64 to Blobs
+            const files = images.map(data => {
+                const blob = base64ToBlob(data.base64);
+                if (!blob) return null;
+                // Create a File object from Blob
+                return new File([blob], data.name, { type: data.type });
+            }).filter(f => f !== null);
 
-            if (navigator.share) {
+            if (navigator.share && files.length > 0) {
                 await navigator.share({
                     files: files,
                     title: `รูปภาพวันที่ ${dateKey}`,
                     text: `รูปภาพจำนวน ${files.length} รูป`
                 });
             } else {
-                alert('เบราว์เซอร์นี้ไม่รองรับการแชร์กลุ่มรูปภาพ');
+                alert('เบราว์เซอร์นี้ไม่รองรับการแชร์กลุ่มรูปภาพ หรือไฟล์เสียหาย');
             }
         } catch (err) {
             console.error('Share group failed:', err);
@@ -282,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
         content.className = 'modal-content';
 
         const img = document.createElement('img');
-        img.src = URL.createObjectURL(data.blob);
+        img.src = data.base64; // Use Base64
 
         const actions = document.createElement('div');
         actions.className = 'modal-actions';
@@ -300,9 +325,11 @@ document.addEventListener('DOMContentLoaded', () => {
         shareBtn.onclick = async (e) => {
             e.stopPropagation();
             try {
-                if (navigator.share) {
+                const blob = base64ToBlob(data.base64);
+                if (blob && navigator.share) {
+                    const file = new File([blob], data.name, { type: data.type });
                     await navigator.share({
-                        files: [data.blob],
+                        files: [file],
                         title: 'แชร์รูปภาพ'
                     });
                 } else {
@@ -385,20 +412,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 for (let i = 0; i < images.length; i++) {
                     const data = images[i];
 
-                    // Determine correct extension from MIME type first, then filename
+                    // Convert Base64 to Blob for saving
+                    const blob = base64ToBlob(data.base64);
+                    if (!blob) {
+                        console.error("Failed to convert blob for", data.name);
+                        errorCount++;
+                        continue;
+                    }
+
+                    // Determine correct extension
                     let ext = 'jpg';
                     if (data.type === 'image/png') ext = 'png';
                     else if (data.type === 'image/webp') ext = 'webp';
-                    else if (data.type === 'image/heic') ext = 'heic';
-                    else if (data.type === 'image/heif') ext = 'heif';
-                    else {
-                        const nameExt = data.name.split('.').pop().toLowerCase();
-                        if (['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(nameExt)) {
-                            ext = nameExt;
-                        }
-                    }
 
-                    // Clean filename base
                     let nameWithoutExt = data.name.substring(0, data.name.lastIndexOf('.')) || 'image';
                     nameWithoutExt = nameWithoutExt.replace(/[^a-z0-9]/gi, '_');
 
@@ -407,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
                         const writable = await fileHandle.createWritable();
-                        await writable.write(data.blob);
+                        await writable.write(blob);
                         await writable.close();
                         totalFiles++;
                     } catch (writeErr) {
@@ -418,7 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const retryName = `backup_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${ext}`;
                             const fileHandle = await dateDirHandle.getFileHandle(retryName, { create: true });
                             const writable = await fileHandle.createWritable();
-                            await writable.write(data.blob);
+                            await writable.write(blob);
                             await writable.close();
                             totalFiles++;
                             errorCount--;
