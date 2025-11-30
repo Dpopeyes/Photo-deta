@@ -74,39 +74,59 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function saveImageToDB(file) {
         return new Promise((resolve, reject) => {
-            const transaction = db.transaction([STORE_NAME], "readwrite");
-            const objectStore = transaction.objectStore(STORE_NAME);
-
-            const timestamp = file.lastModified || Date.now();
-            const date = new Date(timestamp);
-            const dateKey = date.toISOString().split('T')[0];
-
-            // Better MIME type detection
-            let fileType = file.type;
-            if (!fileType) {
-                const ext = file.name.split('.').pop().toLowerCase();
-                if (ext === 'png') fileType = 'image/png';
-                else if (ext === 'webp') fileType = 'image/webp';
-                else if (ext === 'heic') fileType = 'image/heic';
-                else if (ext === 'heif') fileType = 'image/heif';
-                else fileType = 'image/jpeg';
+            // Validate file size
+            if (file.size === 0) {
+                console.warn("File size is 0, skipping:", file.name);
+                resolve(); // Skip empty files
+                return;
             }
 
-            // Recreate Blob to ensure type is set
-            const fixedBlob = new Blob([file], { type: fileType });
+            const reader = new FileReader();
 
-            const imageData = {
-                name: file.name || `photo_${timestamp}.${fileType.split('/')[1] || 'jpg'}`,
-                type: fileType,
-                timestamp: timestamp,
-                dateKey: dateKey,
-                blob: fixedBlob
+            reader.onload = (e) => {
+                const arrayBuffer = e.target.result;
+                const transaction = db.transaction([STORE_NAME], "readwrite");
+                const objectStore = transaction.objectStore(STORE_NAME);
+
+                const timestamp = file.lastModified || Date.now();
+                const date = new Date(timestamp);
+                const dateKey = date.toISOString().split('T')[0];
+
+                // Better MIME type detection
+                let fileType = file.type;
+                if (!fileType || fileType === '') {
+                    const ext = file.name.split('.').pop().toLowerCase();
+                    if (ext === 'png') fileType = 'image/png';
+                    else if (ext === 'webp') fileType = 'image/webp';
+                    else if (ext === 'heic') fileType = 'image/heic';
+                    else if (ext === 'heif') fileType = 'image/heif';
+                    else fileType = 'image/jpeg';
+                }
+
+                // Create a new Blob from the ArrayBuffer to ensure we have the actual data
+                const blob = new Blob([arrayBuffer], { type: fileType });
+
+                const imageData = {
+                    name: file.name || `photo_${timestamp}.${fileType.split('/')[1] || 'jpg'}`,
+                    type: fileType,
+                    timestamp: timestamp,
+                    dateKey: dateKey,
+                    blob: blob
+                };
+
+                const request = objectStore.add(imageData);
+
+                request.onsuccess = () => resolve();
+                request.onerror = (event) => reject(event.target.error);
             };
 
-            const request = objectStore.add(imageData);
+            reader.onerror = (e) => {
+                console.error("FileReader error:", e);
+                reject(e);
+            };
 
-            request.onsuccess = () => resolve();
-            request.onerror = (event) => reject(event.target.error);
+            // Read the file content to ensure we capture the data
+            reader.readAsArrayBuffer(file);
         });
     }
 
