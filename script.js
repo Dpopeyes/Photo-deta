@@ -4,16 +4,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const galleryContainer = document.getElementById('gallery-container');
     const emptyState = document.getElementById('empty-state');
     const clearBtn = document.getElementById('clear-btn');
+    const saveFolderBtn = document.getElementById('save-folder-btn');
 
     let imageGroups = {};
 
     loadFromStorage();
 
-    // Listen to both inputs
     galleryInput.addEventListener('change', handleFiles);
     cameraInput.addEventListener('change', handleFiles);
-
     clearBtn.addEventListener('click', clearGallery);
+    saveFolderBtn.addEventListener('click', saveToFolderStructure);
 
     function handleFiles(e) {
         const files = Array.from(e.target.files);
@@ -39,8 +39,6 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             reader.readAsDataURL(file);
         });
-
-        // Reset inputs
         e.target.value = '';
     }
 
@@ -58,7 +56,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderGallery() {
         galleryContainer.innerHTML = '';
-
         const sortedDateKeys = Object.keys(imageGroups).sort((a, b) => b.localeCompare(a));
 
         if (sortedDateKeys.length === 0) {
@@ -71,10 +68,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const groupDiv = document.createElement('div');
             groupDiv.className = 'date-group';
 
+            const headerContainer = document.createElement('div');
+            headerContainer.className = 'date-header-container';
+
             const header = document.createElement('h3');
             header.className = 'date-header';
             header.textContent = formatDateHeader(dateKey);
-            groupDiv.appendChild(header);
+
+            headerContainer.appendChild(header);
+            groupDiv.appendChild(headerContainer);
 
             const grid = document.createElement('div');
             grid.className = 'photo-grid';
@@ -89,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 img.loading = 'lazy';
                 img.onload = () => img.classList.add('loaded');
 
-                photoItem.onclick = () => viewImage(imgData.src);
+                photoItem.onclick = () => viewImage(imgData);
 
                 photoItem.appendChild(img);
                 grid.appendChild(photoItem);
@@ -152,21 +154,123 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function viewImage(src) {
+    // --- File System Access API Feature ---
+
+    async function saveToFolderStructure() {
+        // Check browser support
+        if (!window.showDirectoryPicker) {
+            alert('ขออภัย เบราว์เซอร์ของคุณไม่รองรับการสร้างโฟลเดอร์โดยตรง (ฟีเจอร์นี้รองรับเฉพาะ Chrome บน PC หรือ Android บางรุ่นที่เปิดใช้งาน File System Access)');
+            return;
+        }
+
+        if (Object.keys(imageGroups).length === 0) {
+            alert('ไม่มีรูปภาพให้บันทึก');
+            return;
+        }
+
+        try {
+            alert('กรุณาเลือกโฟลเดอร์หลักที่จะใช้เก็บรูปภาพ (หรือสร้างโฟลเดอร์ใหม่)');
+
+            // 1. Ask user to pick a root directory
+            const rootHandle = await window.showDirectoryPicker();
+
+            // Show loading indicator
+            const originalIcon = saveFolderBtn.innerHTML;
+            saveFolderBtn.innerHTML = '<span class="material-icons-round">hourglass_top</span>';
+            saveFolderBtn.disabled = true;
+
+            let totalFiles = 0;
+
+            // 2. Loop through date groups
+            for (const [dateKey, images] of Object.entries(imageGroups)) {
+                // 3. Create/Get sub-directory for this date (e.g., "2023-11-30")
+                const dateDirHandle = await rootHandle.getDirectoryHandle(dateKey, { create: true });
+
+                // 4. Save files into this sub-directory
+                for (let i = 0; i < images.length; i++) {
+                    const imgData = images[i];
+
+                    // Convert Base64 to Blob
+                    const response = await fetch(imgData.src);
+                    const blob = await response.blob();
+
+                    // Create file handle
+                    const fileName = imgData.name || `image_${Date.now()}_${i}.jpg`;
+                    const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
+
+                    // Write to file
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+
+                    totalFiles++;
+                }
+            }
+
+            alert(`บันทึกเรียบร้อย! ทั้งหมด ${totalFiles} รูปในโฟลเดอร์ที่เลือก`);
+
+        } catch (err) {
+            console.error('Save to folder failed:', err);
+            if (err.name !== 'AbortError') { // Don't alert if user cancelled
+                alert('เกิดข้อผิดพลาดในการบันทึก: ' + err.message);
+            }
+        } finally {
+            saveFolderBtn.innerHTML = '<span class="material-icons-round">drive_file_move</span>';
+            saveFolderBtn.disabled = false;
+        }
+    }
+
+    function viewImage(imgData) {
         const modal = document.createElement('div');
-        modal.style.cssText = `
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.9); z-index: 1000;
-            display: flex; align-items: center; justify-content: center;
-            cursor: zoom-out; animation: fadeIn 0.2s;
-        `;
+        modal.className = 'modal-overlay';
+
+        const content = document.createElement('div');
+        content.className = 'modal-content';
 
         const img = document.createElement('img');
-        img.src = src;
-        img.style.cssText = `max-width: 100%; max-height: 100%; object-fit: contain;`;
+        img.src = imgData.src;
 
-        modal.appendChild(img);
-        modal.onclick = () => document.body.removeChild(modal);
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const shareBtn = document.createElement('button');
+        shareBtn.className = 'action-btn';
+        shareBtn.innerHTML = '<span class="material-icons-round">share</span> แชร์';
+        shareBtn.onclick = async (e) => {
+            e.stopPropagation();
+            try {
+                const blob = await (await fetch(imgData.src)).blob();
+                const file = new File([blob], imgData.name || 'image.jpg', { type: blob.type });
+
+                if (navigator.share) {
+                    await navigator.share({
+                        files: [file],
+                        title: 'แชร์รูปภาพ'
+                    });
+                } else {
+                    alert('เบราว์เซอร์นี้ไม่รองรับการแชร์');
+                }
+            } catch (err) {
+                console.error('Share failed:', err);
+            }
+        };
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'action-btn secondary';
+        closeBtn.innerHTML = '<span class="material-icons-round">close</span>';
+        closeBtn.onclick = () => document.body.removeChild(modal);
+
+        actions.appendChild(shareBtn);
+        actions.appendChild(closeBtn);
+
+        content.appendChild(img);
+        content.appendChild(actions);
+        modal.appendChild(content);
+
+        modal.onclick = (e) => {
+            if (e.target === modal) document.body.removeChild(modal);
+        };
+
         document.body.appendChild(modal);
     }
 });
