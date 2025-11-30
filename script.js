@@ -6,52 +6,133 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearBtn = document.getElementById('clear-btn');
     const saveFolderBtn = document.getElementById('save-folder-btn');
 
+    // IndexedDB Configuration
+    const DB_NAME = 'PhotoGalleryDB';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'images';
+
+    let db;
     let imageGroups = {};
 
-    loadFromStorage();
+    // Initialize Database
+    initDB();
 
     galleryInput.addEventListener('change', handleFiles);
     cameraInput.addEventListener('change', handleFiles);
     clearBtn.addEventListener('click', clearGallery);
     saveFolderBtn.addEventListener('click', saveToFolderStructure);
 
+    function initDB() {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onerror = (event) => {
+            console.error("Database error: " + event.target.errorCode);
+            alert("ไม่สามารถเปิดฐานข้อมูลได้");
+        };
+
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            // Create an objectStore to hold information about our customers. We're
+            // going to use "id" as our key path because it's guaranteed to be
+            // unique.
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                const objectStore = db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+                objectStore.createIndex("dateKey", "dateKey", { unique: false });
+                objectStore.createIndex("timestamp", "timestamp", { unique: false });
+            }
+        };
+
+        request.onsuccess = (event) => {
+            db = event.target.result;
+            loadGalleryFromDB();
+        };
+    }
+
     function handleFiles(e) {
         const files = Array.from(e.target.files);
         if (files.length === 0) return;
 
-        let processedCount = 0;
+        // Process files sequentially to ensure order
+        let promiseChain = Promise.resolve();
 
         files.forEach(file => {
             if (!file.type.startsWith('image/')) return;
 
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const src = e.target.result;
-                const timestamp = file.lastModified || Date.now();
-
-                addImageToGroup(src, timestamp, file.name);
-
-                processedCount++;
-                if (processedCount === files.length) {
-                    saveToStorage();
-                    renderGallery();
-                }
-            };
-            reader.readAsDataURL(file);
+            promiseChain = promiseChain.then(() => {
+                return new Promise((resolve, reject) => {
+                    // We store the file (Blob) directly, no need for FileReader to Base64
+                    // This saves memory and storage space
+                    saveImageToDB(file).then(() => {
+                        resolve();
+                    }).catch(err => {
+                        console.error("Error saving file:", err);
+                        resolve(); // Continue even if one fails
+                    });
+                });
+            });
         });
-        e.target.value = '';
+
+        promiseChain.then(() => {
+            // Reload gallery after all saves are done
+            loadGalleryFromDB();
+            e.target.value = ''; // Reset input
+        });
     }
 
-    function addImageToGroup(src, timestamp, name) {
-        const date = new Date(timestamp);
-        const dateKey = date.toISOString().split('T')[0];
+    function saveImageToDB(file) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], "readwrite");
+            const objectStore = transaction.objectStore(STORE_NAME);
 
-        if (!imageGroups[dateKey]) {
-            imageGroups[dateKey] = [];
-        }
+            const timestamp = file.lastModified || Date.now();
+            const date = new Date(timestamp);
+            const dateKey = date.toISOString().split('T')[0];
 
-        imageGroups[dateKey].push({ src, timestamp, name });
-        imageGroups[dateKey].sort((a, b) => b.timestamp - a.timestamp);
+            const imageData = {
+                name: file.name,
+                type: file.type,
+                timestamp: timestamp,
+                dateKey: dateKey,
+                blob: file // Store the File object directly!
+            };
+
+            const request = objectStore.add(imageData);
+
+            request.onsuccess = () => resolve();
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    function loadGalleryFromDB() {
+        const transaction = db.transaction([STORE_NAME], "readonly");
+        const objectStore = transaction.objectStore(STORE_NAME);
+        const index = objectStore.index("timestamp"); // Sort by timestamp
+
+        imageGroups = {}; // Reset local groups
+
+        // Open cursor to iterate all items
+        // direction 'prev' sorts by timestamp descending (newest first)
+        const request = index.openCursor(null, 'prev');
+
+        request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+                const data = cursor.value;
+
+                if (!imageGroups[data.dateKey]) {
+                    imageGroups[data.dateKey] = [];
+                }
+
+                // We keep the blob in memory only for rendering. 
+                // URL.createObjectURL is efficient.
+                imageGroups[data.dateKey].push(data);
+
+                cursor.continue();
+            } else {
+                // Iteration complete
+                renderGallery();
+            }
+        };
     }
 
     function renderGallery() {
@@ -75,23 +156,32 @@ document.addEventListener('DOMContentLoaded', () => {
             header.className = 'date-header';
             header.textContent = formatDateHeader(dateKey);
 
+            // Share Group Button
+            const shareGroupBtn = document.createElement('button');
+            shareGroupBtn.className = 'icon-btn small';
+            shareGroupBtn.innerHTML = '<span class="material-icons-round" style="font-size: 18px;">share</span>';
+            shareGroupBtn.title = 'แชร์รูปทั้งหมดในวันนี้';
+            shareGroupBtn.onclick = () => shareGroup(dateKey);
+
             headerContainer.appendChild(header);
+            headerContainer.appendChild(shareGroupBtn);
             groupDiv.appendChild(headerContainer);
 
             const grid = document.createElement('div');
             grid.className = 'photo-grid';
 
-            imageGroups[dateKey].forEach(imgData => {
+            imageGroups[dateKey].forEach(data => {
                 const photoItem = document.createElement('div');
                 photoItem.className = 'photo-item';
 
                 const img = document.createElement('img');
-                img.src = imgData.src;
-                img.alt = imgData.name;
+                // Create object URL from the stored Blob
+                img.src = URL.createObjectURL(data.blob);
+                img.alt = data.name;
                 img.loading = 'lazy';
                 img.onload = () => img.classList.add('loaded');
 
-                photoItem.onclick = () => viewImage(imgData);
+                photoItem.onclick = () => viewImage(data);
 
                 photoItem.appendChild(img);
                 grid.appendChild(photoItem);
@@ -125,102 +215,48 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function saveToStorage() {
-        try {
-            localStorage.setItem('my_gallery_data', JSON.stringify(imageGroups));
-        } catch (e) {
-            console.warn('Storage full', e);
-            alert('พื้นที่จัดเก็บเต็ม รูปภาพบางส่วนอาจไม่ถูกบันทึก');
-        }
-    }
-
-    function loadFromStorage() {
-        try {
-            const data = localStorage.getItem('my_gallery_data');
-            if (data) {
-                imageGroups = JSON.parse(data);
-                renderGallery();
-            }
-        } catch (e) {
-            console.error('Error loading data', e);
-        }
-    }
-
     function clearGallery() {
-        if (confirm('ต้องการลบรูปภาพทั้งหมดใช่หรือไม่?')) {
-            imageGroups = {};
-            localStorage.removeItem('my_gallery_data');
-            renderGallery();
+        if (confirm('ต้องการลบรูปภาพทั้งหมดใช่หรือไม่? (ไม่สามารถกู้คืนได้)')) {
+            const transaction = db.transaction([STORE_NAME], "readwrite");
+            const objectStore = transaction.objectStore(STORE_NAME);
+            const request = objectStore.clear();
+
+            request.onsuccess = () => {
+                loadGalleryFromDB(); // Reload (empty)
+            };
+
+            request.onerror = (e) => {
+                console.error("Clear failed:", e);
+                alert("เกิดข้อผิดพลาดในการลบข้อมูล");
+            };
         }
     }
 
-    // --- File System Access API Feature ---
+    // --- Features ---
 
-    async function saveToFolderStructure() {
-        // Check browser support
-        if (!window.showDirectoryPicker) {
-            alert('ขออภัย เบราว์เซอร์ของคุณไม่รองรับการสร้างโฟลเดอร์โดยตรง (ฟีเจอร์นี้รองรับเฉพาะ Chrome บน PC หรือ Android บางรุ่นที่เปิดใช้งาน File System Access)');
-            return;
-        }
-
-        if (Object.keys(imageGroups).length === 0) {
-            alert('ไม่มีรูปภาพให้บันทึก');
-            return;
-        }
+    async function shareGroup(dateKey) {
+        const images = imageGroups[dateKey];
+        if (!images || images.length === 0) return;
 
         try {
-            alert('กรุณาเลือกโฟลเดอร์หลักที่จะใช้เก็บรูปภาพ (หรือสร้างโฟลเดอร์ใหม่)');
+            const files = images.map(data => data.blob); // We already have File objects
 
-            // 1. Ask user to pick a root directory
-            const rootHandle = await window.showDirectoryPicker();
-
-            // Show loading indicator
-            const originalIcon = saveFolderBtn.innerHTML;
-            saveFolderBtn.innerHTML = '<span class="material-icons-round">hourglass_top</span>';
-            saveFolderBtn.disabled = true;
-
-            let totalFiles = 0;
-
-            // 2. Loop through date groups
-            for (const [dateKey, images] of Object.entries(imageGroups)) {
-                // 3. Create/Get sub-directory for this date (e.g., "2023-11-30")
-                const dateDirHandle = await rootHandle.getDirectoryHandle(dateKey, { create: true });
-
-                // 4. Save files into this sub-directory
-                for (let i = 0; i < images.length; i++) {
-                    const imgData = images[i];
-
-                    // Convert Base64 to Blob
-                    const response = await fetch(imgData.src);
-                    const blob = await response.blob();
-
-                    // Create file handle
-                    const fileName = imgData.name || `image_${Date.now()}_${i}.jpg`;
-                    const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
-
-                    // Write to file
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(blob);
-                    await writable.close();
-
-                    totalFiles++;
-                }
+            if (navigator.share) {
+                await navigator.share({
+                    files: files,
+                    title: `รูปภาพวันที่ ${dateKey}`,
+                    text: `รูปภาพจำนวน ${files.length} รูป`
+                });
+            } else {
+                alert('เบราว์เซอร์นี้ไม่รองรับการแชร์กลุ่มรูปภาพ');
             }
-
-            alert(`บันทึกเรียบร้อย! ทั้งหมด ${totalFiles} รูปในโฟลเดอร์ที่เลือก`);
-
         } catch (err) {
-            console.error('Save to folder failed:', err);
-            if (err.name !== 'AbortError') { // Don't alert if user cancelled
-                alert('เกิดข้อผิดพลาดในการบันทึก: ' + err.message);
-            }
-        } finally {
-            saveFolderBtn.innerHTML = '<span class="material-icons-round">drive_file_move</span>';
-            saveFolderBtn.disabled = false;
+            console.error('Share group failed:', err);
+            alert('เกิดข้อผิดพลาดในการแชร์ (อาจมีรูปเยอะเกินไป)');
         }
     }
 
-    function viewImage(imgData) {
+    function viewImage(data) {
         const modal = document.createElement('div');
         modal.className = 'modal-overlay';
 
@@ -228,23 +264,29 @@ document.addEventListener('DOMContentLoaded', () => {
         content.className = 'modal-content';
 
         const img = document.createElement('img');
-        img.src = imgData.src;
+        img.src = URL.createObjectURL(data.blob);
 
         const actions = document.createElement('div');
         actions.className = 'modal-actions';
 
+        // Save Button
+        const saveBtn = document.createElement('a');
+        saveBtn.className = 'action-btn';
+        saveBtn.innerHTML = '<span class="material-icons-round">save_alt</span> บันทึก';
+        saveBtn.download = data.name;
+        saveBtn.href = img.src;
+        saveBtn.style.textDecoration = 'none';
+
+        // Share Button
         const shareBtn = document.createElement('button');
-        shareBtn.className = 'action-btn';
+        shareBtn.className = 'action-btn secondary';
         shareBtn.innerHTML = '<span class="material-icons-round">share</span> แชร์';
         shareBtn.onclick = async (e) => {
             e.stopPropagation();
             try {
-                const blob = await (await fetch(imgData.src)).blob();
-                const file = new File([blob], imgData.name || 'image.jpg', { type: blob.type });
-
                 if (navigator.share) {
                     await navigator.share({
-                        files: [file],
+                        files: [data.blob],
                         title: 'แชร์รูปภาพ'
                     });
                 } else {
@@ -255,12 +297,28 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
 
+        // Delete Single Image Button
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'action-btn secondary';
+        deleteBtn.style.backgroundColor = '#ffb4ab';
+        deleteBtn.style.color = '#690005';
+        deleteBtn.innerHTML = '<span class="material-icons-round">delete</span>';
+        deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (confirm('ต้องการลบรูปนี้?')) {
+                deleteImage(data.id);
+                document.body.removeChild(modal);
+            }
+        };
+
         const closeBtn = document.createElement('button');
         closeBtn.className = 'action-btn secondary';
         closeBtn.innerHTML = '<span class="material-icons-round">close</span>';
         closeBtn.onclick = () => document.body.removeChild(modal);
 
+        actions.appendChild(saveBtn);
         actions.appendChild(shareBtn);
+        actions.appendChild(deleteBtn);
         actions.appendChild(closeBtn);
 
         content.appendChild(img);
@@ -272,5 +330,65 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         document.body.appendChild(modal);
+    }
+
+    function deleteImage(id) {
+        const transaction = db.transaction([STORE_NAME], "readwrite");
+        const objectStore = transaction.objectStore(STORE_NAME);
+        const request = objectStore.delete(id);
+
+        request.onsuccess = () => {
+            loadGalleryFromDB();
+        };
+    }
+
+    async function saveToFolderStructure() {
+        if (!window.showDirectoryPicker) {
+            alert('ขออภัย เบราว์เซอร์ของคุณไม่รองรับการสร้างโฟลเดอร์โดยตรง');
+            return;
+        }
+
+        if (Object.keys(imageGroups).length === 0) {
+            alert('ไม่มีรูปภาพให้บันทึก');
+            return;
+        }
+
+        try {
+            alert('กรุณาเลือกโฟลเดอร์หลักที่จะใช้เก็บรูปภาพ');
+            const rootHandle = await window.showDirectoryPicker();
+
+            const originalIcon = saveFolderBtn.innerHTML;
+            saveFolderBtn.innerHTML = '<span class="material-icons-round">hourglass_top</span>';
+            saveFolderBtn.disabled = true;
+
+            let totalFiles = 0;
+
+            for (const [dateKey, images] of Object.entries(imageGroups)) {
+                const dateDirHandle = await rootHandle.getDirectoryHandle(dateKey, { create: true });
+
+                for (let i = 0; i < images.length; i++) {
+                    const data = images[i];
+                    const fileName = data.name || `image_${data.timestamp}.jpg`;
+                    const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
+
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(data.blob);
+                    await writable.close();
+
+                    totalFiles++;
+                }
+            }
+
+            alert(`บันทึกเรียบร้อย! ทั้งหมด ${totalFiles} รูป`);
+
+        } catch (err) {
+            console.error('Save to folder failed:', err);
+            if (err.name !== 'AbortError') {
+                alert('เกิดข้อผิดพลาดในการบันทึก: ' + err.message);
+            }
+        } finally {
+            saveFolderBtn.innerHTML = '<span class="material-icons-round">drive_file_move</span>';
+            saveFolderBtn.disabled = false;
+        }
     }
 });
