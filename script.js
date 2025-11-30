@@ -32,9 +32,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         request.onupgradeneeded = (event) => {
             const db = event.target.result;
-            // Create an objectStore to hold information about our customers. We're
-            // going to use "id" as our key path because it's guaranteed to be
-            // unique.
             if (!db.objectStoreNames.contains(STORE_NAME)) {
                 const objectStore = db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
                 objectStore.createIndex("dateKey", "dateKey", { unique: false });
@@ -52,11 +49,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const files = Array.from(e.target.files);
         if (files.length === 0) return;
 
-        // Process files sequentially to ensure order
         let promiseChain = Promise.resolve();
 
         files.forEach(file => {
-            // Relaxed check: Allow empty type (common in some cameras) or image/*
             if (file.type && !file.type.startsWith('image/')) return;
 
             promiseChain = promiseChain.then(() => {
@@ -65,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         resolve();
                     }).catch(err => {
                         console.error("Error saving file:", err);
-                        resolve(); // Continue even if one fails
+                        resolve();
                     });
                 });
             });
@@ -73,7 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         promiseChain.then(() => {
             loadGalleryFromDB();
-            e.target.value = ''; // Reset input
+            e.target.value = '';
         });
     }
 
@@ -86,17 +81,26 @@ document.addEventListener('DOMContentLoaded', () => {
             const date = new Date(timestamp);
             const dateKey = date.toISOString().split('T')[0];
 
-            // Ensure we have a valid MIME type. Camera sometimes returns empty string.
-            // We recreate the Blob to ensure it's stable and has a type.
-            const fileType = file.type || 'image/jpeg';
+            // Better MIME type detection
+            let fileType = file.type;
+            if (!fileType) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                if (ext === 'png') fileType = 'image/png';
+                else if (ext === 'webp') fileType = 'image/webp';
+                else if (ext === 'heic') fileType = 'image/heic';
+                else if (ext === 'heif') fileType = 'image/heif';
+                else fileType = 'image/jpeg';
+            }
+
+            // Recreate Blob to ensure type is set
             const fixedBlob = new Blob([file], { type: fileType });
 
             const imageData = {
-                name: file.name || `photo_${timestamp}.jpg`,
+                name: file.name || `photo_${timestamp}.${fileType.split('/')[1] || 'jpg'}`,
                 type: fileType,
                 timestamp: timestamp,
                 dateKey: dateKey,
-                blob: fixedBlob // Store the normalized Blob
+                blob: fixedBlob
             };
 
             const request = objectStore.add(imageData);
@@ -109,12 +113,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function loadGalleryFromDB() {
         const transaction = db.transaction([STORE_NAME], "readonly");
         const objectStore = transaction.objectStore(STORE_NAME);
-        const index = objectStore.index("timestamp"); // Sort by timestamp
+        const index = objectStore.index("timestamp");
 
-        imageGroups = {}; // Reset local groups
+        imageGroups = {};
 
-        // Open cursor to iterate all items
-        // direction 'prev' sorts by timestamp descending (newest first)
         const request = index.openCursor(null, 'prev');
 
         request.onsuccess = (event) => {
@@ -126,13 +128,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     imageGroups[data.dateKey] = [];
                 }
 
-                // We keep the blob in memory only for rendering. 
-                // URL.createObjectURL is efficient.
                 imageGroups[data.dateKey].push(data);
 
                 cursor.continue();
             } else {
-                // Iteration complete
                 renderGallery();
             }
         };
@@ -159,7 +158,6 @@ document.addEventListener('DOMContentLoaded', () => {
             header.className = 'date-header';
             header.textContent = formatDateHeader(dateKey);
 
-            // Share Group Button
             const shareGroupBtn = document.createElement('button');
             shareGroupBtn.className = 'icon-btn small';
             shareGroupBtn.innerHTML = '<span class="material-icons-round" style="font-size: 18px;">share</span>';
@@ -178,7 +176,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 photoItem.className = 'photo-item';
 
                 const img = document.createElement('img');
-                // Create object URL from the stored Blob
                 img.src = URL.createObjectURL(data.blob);
                 img.alt = data.name;
                 img.loading = 'lazy';
@@ -225,7 +222,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const request = objectStore.clear();
 
             request.onsuccess = () => {
-                loadGalleryFromDB(); // Reload (empty)
+                loadGalleryFromDB();
             };
 
             request.onerror = (e) => {
@@ -235,14 +232,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- Features ---
-
     async function shareGroup(dateKey) {
         const images = imageGroups[dateKey];
         if (!images || images.length === 0) return;
 
         try {
-            const files = images.map(data => data.blob); // We already have File objects
+            const files = images.map(data => data.blob);
 
             if (navigator.share) {
                 await navigator.share({
@@ -272,7 +267,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const actions = document.createElement('div');
         actions.className = 'modal-actions';
 
-        // Save Button
         const saveBtn = document.createElement('a');
         saveBtn.className = 'action-btn';
         saveBtn.innerHTML = '<span class="material-icons-round">save_alt</span> บันทึก';
@@ -280,7 +274,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveBtn.href = img.src;
         saveBtn.style.textDecoration = 'none';
 
-        // Share Button
         const shareBtn = document.createElement('button');
         shareBtn.className = 'action-btn secondary';
         shareBtn.innerHTML = '<span class="material-icons-round">share</span> แชร์';
@@ -300,7 +293,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
 
-        // Delete Single Image Button
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'action-btn secondary';
         deleteBtn.style.backgroundColor = '#ffb4ab';
@@ -351,6 +343,11 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        if (Object.keys(imageGroups).length === 0) {
+            alert('ไม่มีรูปภาพให้บันทึก');
+            return;
+        }
+
         try {
             alert('กรุณาเลือกโฟลเดอร์หลักที่จะใช้เก็บรูปภาพ');
             const rootHandle = await window.showDirectoryPicker();
@@ -363,20 +360,26 @@ document.addEventListener('DOMContentLoaded', () => {
             let errorCount = 0;
 
             for (const [dateKey, images] of Object.entries(imageGroups)) {
-                // Create directory for the date
                 const dateDirHandle = await rootHandle.getDirectoryHandle(dateKey, { create: true });
 
                 for (let i = 0; i < images.length; i++) {
                     const data = images[i];
 
-                    // Generate a unique filename to avoid "state cached" errors and conflicts
-                    // We use the original name + timestamp + index
-                    let originalName = data.name || 'image.jpg';
-                    let ext = originalName.split('.').pop();
-                    if (!ext || ext === originalName) ext = 'jpg'; // Default extension
-                    let nameWithoutExt = originalName.substring(0, originalName.lastIndexOf('.')) || 'image';
+                    // Determine correct extension from MIME type first, then filename
+                    let ext = 'jpg';
+                    if (data.type === 'image/png') ext = 'png';
+                    else if (data.type === 'image/webp') ext = 'webp';
+                    else if (data.type === 'image/heic') ext = 'heic';
+                    else if (data.type === 'image/heif') ext = 'heif';
+                    else {
+                        const nameExt = data.name.split('.').pop().toLowerCase();
+                        if (['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(nameExt)) {
+                            ext = nameExt;
+                        }
+                    }
 
-                    // Sanitize filename
+                    // Clean filename base
+                    let nameWithoutExt = data.name.substring(0, data.name.lastIndexOf('.')) || 'image';
                     nameWithoutExt = nameWithoutExt.replace(/[^a-z0-9]/gi, '_');
 
                     const fileName = `${nameWithoutExt}_${data.timestamp}_${i}.${ext}`;
@@ -391,7 +394,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.error(`Failed to save ${fileName}:`, writeErr);
                         errorCount++;
 
-                        // Retry once with a completely random name if it failed
                         try {
                             const retryName = `backup_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${ext}`;
                             const fileHandle = await dateDirHandle.getFileHandle(retryName, { create: true });
@@ -399,7 +401,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             await writable.write(data.blob);
                             await writable.close();
                             totalFiles++;
-                            errorCount--; // Success on retry
+                            errorCount--;
                         } catch (retryErr) {
                             console.error("Retry failed:", retryErr);
                         }
