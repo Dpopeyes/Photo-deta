@@ -56,12 +56,11 @@ document.addEventListener('DOMContentLoaded', () => {
         let promiseChain = Promise.resolve();
 
         files.forEach(file => {
-            if (!file.type.startsWith('image/')) return;
+            // Relaxed check: Allow empty type (common in some cameras) or image/*
+            if (file.type && !file.type.startsWith('image/')) return;
 
             promiseChain = promiseChain.then(() => {
                 return new Promise((resolve, reject) => {
-                    // We store the file (Blob) directly, no need for FileReader to Base64
-                    // This saves memory and storage space
                     saveImageToDB(file).then(() => {
                         resolve();
                     }).catch(err => {
@@ -73,7 +72,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         promiseChain.then(() => {
-            // Reload gallery after all saves are done
             loadGalleryFromDB();
             e.target.value = ''; // Reset input
         });
@@ -88,12 +86,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const date = new Date(timestamp);
             const dateKey = date.toISOString().split('T')[0];
 
+            // Ensure we have a valid MIME type. Camera sometimes returns empty string.
+            // We recreate the Blob to ensure it's stable and has a type.
+            const fileType = file.type || 'image/jpeg';
+            const fixedBlob = new Blob([file], { type: fileType });
+
             const imageData = {
-                name: file.name,
-                type: file.type,
+                name: file.name || `photo_${timestamp}.jpg`,
+                type: fileType,
                 timestamp: timestamp,
                 dateKey: dateKey,
-                blob: file // Store the File object directly!
+                blob: fixedBlob // Store the normalized Blob
             };
 
             const request = objectStore.add(imageData);
@@ -348,11 +351,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (Object.keys(imageGroups).length === 0) {
-            alert('ไม่มีรูปภาพให้บันทึก');
-            return;
-        }
-
         try {
             alert('กรุณาเลือกโฟลเดอร์หลักที่จะใช้เก็บรูปภาพ');
             const rootHandle = await window.showDirectoryPicker();
@@ -362,24 +360,58 @@ document.addEventListener('DOMContentLoaded', () => {
             saveFolderBtn.disabled = true;
 
             let totalFiles = 0;
+            let errorCount = 0;
 
             for (const [dateKey, images] of Object.entries(imageGroups)) {
+                // Create directory for the date
                 const dateDirHandle = await rootHandle.getDirectoryHandle(dateKey, { create: true });
 
                 for (let i = 0; i < images.length; i++) {
                     const data = images[i];
-                    const fileName = data.name || `image_${data.timestamp}.jpg`;
-                    const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
 
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(data.blob);
-                    await writable.close();
+                    // Generate a unique filename to avoid "state cached" errors and conflicts
+                    // We use the original name + timestamp + index
+                    let originalName = data.name || 'image.jpg';
+                    let ext = originalName.split('.').pop();
+                    if (!ext || ext === originalName) ext = 'jpg'; // Default extension
+                    let nameWithoutExt = originalName.substring(0, originalName.lastIndexOf('.')) || 'image';
 
-                    totalFiles++;
+                    // Sanitize filename
+                    nameWithoutExt = nameWithoutExt.replace(/[^a-z0-9]/gi, '_');
+
+                    const fileName = `${nameWithoutExt}_${data.timestamp}_${i}.${ext}`;
+
+                    try {
+                        const fileHandle = await dateDirHandle.getFileHandle(fileName, { create: true });
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(data.blob);
+                        await writable.close();
+                        totalFiles++;
+                    } catch (writeErr) {
+                        console.error(`Failed to save ${fileName}:`, writeErr);
+                        errorCount++;
+
+                        // Retry once with a completely random name if it failed
+                        try {
+                            const retryName = `backup_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${ext}`;
+                            const fileHandle = await dateDirHandle.getFileHandle(retryName, { create: true });
+                            const writable = await fileHandle.createWritable();
+                            await writable.write(data.blob);
+                            await writable.close();
+                            totalFiles++;
+                            errorCount--; // Success on retry
+                        } catch (retryErr) {
+                            console.error("Retry failed:", retryErr);
+                        }
+                    }
                 }
             }
 
-            alert(`บันทึกเรียบร้อย! ทั้งหมด ${totalFiles} รูป`);
+            if (errorCount > 0) {
+                alert(`บันทึกเสร็จสิ้น ${totalFiles} รูป (มีข้อผิดพลาด ${errorCount} รูป)`);
+            } else {
+                alert(`บันทึกเรียบร้อย! ทั้งหมด ${totalFiles} รูป`);
+            }
 
         } catch (err) {
             console.error('Save to folder failed:', err);
