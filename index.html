@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="th">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo Gallery</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <!-- Add Playpen Sans for user preference -->
+    <link href="https://fonts.googleapis.com/css2?family=Playpen+Sans:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+</head>
+
+<body>
+
+    <header class="app-header">
+        <div class="header-content">
+            <h1>แกลเลอรี</h1>
+            <div class="header-icons">
+                <button id="clear-btn" class="icon-btn" title="ล้างรูปภาพทั้งหมด">
+                    <span class="material-icons-round">delete_sweep</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main id="gallery-container" class="gallery-container">
+        <div class="empty-state" id="empty-state">
+            <span class="material-icons-round empty-icon">photo_camera</span>
+            <p>ยังไม่มีรูปภาพ</p>
+            <p class="sub-text">กดปุ่มกล้องเพื่อถ่ายรูป หรือปุ่มรูปภาพเพื่อเลือกจากอัลบั้ม</p>
+        </div>
+    </main>
+
+    <div class="fab-container">
+        <!-- ปุ่มเลือกจากอัลบั้ม (รอง) -->
+        <label for="gallery-input" class="fab mini" title="เลือกจากอัลบั้ม">
+            <span class="material-icons-round">photo_library</span>
+        </label>
+
+        <!-- ปุ่มถ่ายรูป (หลัก) -->
+        <label for="camera-input" class="fab" title="ถ่ายรูป">
+            <span class="material-icons-round">camera_alt</span>
+        </label>
+
+        <!-- Inputs -->
+        <input type="file" id="gallery-input" accept="image/*" multiple hidden>
+        <input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
